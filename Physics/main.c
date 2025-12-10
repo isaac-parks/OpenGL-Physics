@@ -13,11 +13,36 @@ float speed = 0.0;
 float x = 0.0;
 float y = 1;
 double lastTime = 0.0f;
-double DAMPENER = 1.0;
+double DAMPENER = 1;
 float transformBuff[4] = { 0 };
 bool hovering = false;
 bool previouslyHovering = false;
+bool mousePressed = false;
 GLFWwindow* window = NULL;
+
+vec4 mouseRay;
+
+// Check if mouse ray intersects with the cube (simplified for orthographic projection)
+bool checkRayCubeIntersection(double mouseX, double mouseY) {
+    int windowWidth, windowHeight;
+    glfwGetWindowSize(window, &windowWidth, &windowHeight);
+    
+    // Convert mouse coordinates to world coordinates
+    // Since we're using orthographic projection, we can directly map screen to world
+    float worldX = (2.0f * mouseX / windowWidth - 1.0f);
+    float worldY = -(2.0f * mouseY / windowHeight - 1.0f);
+    
+    // Apply the view transformation (translation by x, y)
+    worldX -= x;
+    worldY -= y;
+    
+    // Check if the point is within the cube bounds
+    // The cube is scaled by 0.25, so its bounds are ±0.125 in each direction
+    float cubeSize = 0.125f;
+    
+    return (worldX >= -cubeSize && worldX <= cubeSize &&
+            worldY >= -cubeSize && worldY <= cubeSize);
+}
 
 void processInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
@@ -29,31 +54,43 @@ void framebufferSizeCallback(GLFWwindow* window, int width, int height) {
     glViewport(0, 0, width, height);
 }
 
-bool checkIfHoveringCube(GLFWwindow* window, int x, int y) {
-    glFlush();
-    glFinish();
-
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-
-    unsigned char data[4];
-    glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, data);
-
+void createMouseRay(double x, double y, vec4 out) {
+    int windowWidth;
     int windowHeight;
-    glfwGetWindowSize(window, NULL, &windowHeight);
-    int flippedY = windowHeight - y;
+    glfwGetWindowSize(window, &windowWidth, &windowHeight);
+    double xpos = isaacnormalize(0, windowWidth, x);
+    double ypos = isaacnormalize(0, windowHeight, y);
+    double zpos = 1.0f;
+    ypos = -ypos;
 
-    glReadPixels(x, flippedY, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, data);
-
-    bool hovering = data[0] != 0 || data[1] != 0 || data[2] != 0;
-
-    return hovering;
+    out[0] = xpos;
+    out[1] = ypos;
+    out[2] = zpos;
+    out[3] = 0.0;
 }
 
 void cursorCallback(GLFWwindow* window, double xpos, double ypos) {
-    if (checkIfHoveringCube(window, xpos, ypos) && glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT)) {
+    createMouseRay(xpos, ypos, mouseRay);
+    
+    // Check for continuous hovering when mouse is pressed
+    if (mousePressed && checkRayCubeIntersection(xpos, ypos)) {
         hovering = true;
-    } 
-    else {
+    } else if (!mousePressed) {
+        hovering = false;
+    }
+}
+
+void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+        mousePressed = true;
+        double xpos, ypos;
+        glfwGetCursorPos(window, &xpos, &ypos);
+        
+        if (checkRayCubeIntersection(xpos, ypos)) {
+            hovering = true;
+        }
+    } else if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_RELEASE) {
+        mousePressed = false;
         hovering = false;
     }
 }
@@ -72,6 +109,7 @@ void initGLFW(GLFWwindow** window) {
     glfwMakeContextCurrent(*window);
     glfwSetFramebufferSizeCallback(*window, framebufferSizeCallback);
     glfwSetCursorPosCallback(*window, cursorCallback);
+    glfwSetMouseButtonCallback(*window, mouseButtonCallback);
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
     {
@@ -134,8 +172,8 @@ void initCube(unsigned int* VBO, unsigned int* VAO, unsigned int* texture) {
     glBindBuffer(GL_ARRAY_BUFFER, *VBO);
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0); // Positions
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float))); // Textures
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
 }
@@ -155,7 +193,7 @@ void initShaders(unsigned int* shaderProgram, unsigned int* vertexShader, unsign
 }
 
 void updateYVelocity() {
-    if (previouslyHovering != false) {
+    if (previouslyHovering) {
         previouslyHovering = false;
         lastTime = glfwGetTime();
     }
@@ -171,23 +209,24 @@ void updateYVelocity() {
     }
 }
 
-void transformCube(int shaderProgram) {
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
+void transformCube(int shaderProgram, vec3 position, bool rotate) {
     mat4 model;
 
     identitymat4(model);
+    translatemat4(model, position[0], position[1], position[2]);
 
-    vec3 rotate = { 0.5, 0.5, 1.0 };
-    rotatemat4(model, glfwGetTime(), rotate);
+    if (rotate) {
+        vec3 rotate = { 0.5, 0.5, 1.0 };
+        rotatemat4(model, glfwGetTime(), rotate);
+    }
     scalemat4(model, 0.25, 0.25, 0.25);
     int modelLoc = glGetUniformLocation(shaderProgram, "Model");
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, model);
+
     mat4 view;
     identitymat4(view);
 
-    if (hovering == true) {
+    if (hovering) {
         previouslyHovering = true;
         double xpos, ypos;
         glfwGetCursorPos(window, &xpos, &ypos);
@@ -215,7 +254,7 @@ void transformCube(int shaderProgram) {
     glUniformMatrix4fv(translateLoc, 1, GL_FALSE, orthog);
 }
 
-void bindProgram(int VAO, int shaderProgram, int texture) {
+void bindProgram(int shaderProgram, int texture) {
     glUseProgram(shaderProgram);
     if (texture) {
         glBindTexture(GL_TEXTURE_2D, texture);
@@ -228,9 +267,20 @@ void draw(int VAO) {
 }
 
 void drawCube(GLFWwindow* window, unsigned int shaderProgram, unsigned int VAO, unsigned int texture) {
-    bindProgram(VAO, shaderProgram, texture);
-    transformCube(shaderProgram);
-    draw(VAO);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    vec3 cubePositions[] = {
+        {-0.3, -0.30, -0.2},
+        {0.3, 0.0, -0.9},
+        {-0.5, 0.2, -0.19},
+        {0.7, 0.7, -0.29}
+    };
+    int length = sizeof(cubePositions) / sizeof(cubePositions[0]);
+    for (int i = 0; i < length; i++) {
+        bindProgram(shaderProgram, texture);
+        transformCube(shaderProgram, cubePositions[i], i % 2 == 0 ? true : false);
+        draw(VAO);
+    }
 }
 
 int main() {
